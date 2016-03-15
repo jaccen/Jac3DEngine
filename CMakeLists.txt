@@ -24,7 +24,7 @@ include_directories(
 	External/glm-0.9.6.3
 )
 link_directories(
-	External/lib/${WINDOWS_BIT}
+	${GLES_ROOT}/External/lib/${WINDOWS_BIT}
 )
 
 set(LIBRARY_GLES3 libGLESv2)
