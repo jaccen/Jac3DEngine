@@ -1,140 +1,169 @@
-//
-// Copyright (c) 2008-2016 the Urho3D project.
-//
-// Permission is hereby granted, free of charge, to any person obtaining a copy
-// of this software and associated documentation files (the "Software"), to deal
-// in the Software without restriction, including without limitation the rights
-// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-// copies of the Software, and to permit persons to whom the Software is
-// furnished to do so, subject to the following conditions:
-//
-// The above copyright notice and this permission notice shall be included in
-// all copies or substantial portions of the Software.
-//
-// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
-// THE SOFTWARE.
-//
+#include "Application.hpp"
+#include <iostream>
 
-#include "../Precompiled.h"
-
-#include "../Engine/Application.h"
-#include "../Engine/Engine.h"
-#ifdef IOS
-#include "../Graphics/Graphics.h"
-#include "../Graphics/GraphicsImpl.h"
-#endif
-#include "../IO/IOEvents.h"
-#include "../IO/Log.h"
-
-#include "../DebugNew.h"
-
-namespace Urho3D
-{
-
-#if defined(IOS) || defined(__EMSCRIPTEN__)
-// Code for supporting SDL_iPhoneSetAnimationCallback() and emscripten_set_main_loop_arg()
-#if defined(__EMSCRIPTEN__)
-#include <emscripten/emscripten.h>
-#endif
-void RunFrame(void* data)
-{
-    static_cast<Engine*>(data)->RunFrame();
-}
-#endif
-
-Application::Application(Context* context) :
-    Object(context),
-    exitCode_(EXIT_SUCCESS)
-{
-    engineParameters_ = Engine::ParseParameters(GetArguments());
-
-    // Create the Engine, but do not initialize it yet. Subsystems except Graphics & Renderer are registered at this point
-    engine_ = new Engine(context);
-
-    // Subscribe to log messages so that can show errors if ErrorExit() is called with empty message
-    SubscribeToEvent(E_LOGMESSAGE, URHO3D_HANDLER(Application, HandleLogMessage));
-}
-
-int Application::Run()
-{
-    // Emscripten-specific: C++ exceptions are turned off by default in -O1 (and above), unless '-s DISABLE_EXCEPTION_CATCHING=0' flag is set
-    // Urho3D build configuration uses -O3 (Release), -O2 (RelWithDebInfo), and -O0 (Debug)
-    // Thus, the try-catch block below should be optimised out except in Debug build configuration
-    try
-    {
-        Setup();
-        if (exitCode_)
-            return exitCode_;
-
-        if (!engine_->Initialize(engineParameters_))
-        {
-            ErrorExit();
-            return exitCode_;
-        }
-
-        Start();
-        if (exitCode_)
-            return exitCode_;
-
-        // Platforms other than iOS and Emscripten run a blocking main loop
-#if !defined(IOS) && !defined(__EMSCRIPTEN__)
-        while (!engine_->IsExiting())
-            engine_->RunFrame();
-
-        Stop();
-        // iOS will setup a timer for running animation frames so eg. Game Center can run. In this case we do not
-        // support calling the Stop() function, as the application will never stop manually
-#else
-#if defined(IOS)
-        SDL_iPhoneSetAnimationCallback(GetSubsystem<Graphics>()->GetImpl()->GetWindow(), 1, &RunFrame, engine_);
-#elif defined(__EMSCRIPTEN__)
-        emscripten_set_main_loop_arg(RunFrame, engine_, 0, 1);
-#endif
-#endif
-
-        return exitCode_;
-    }
-    catch (std::bad_alloc&)
-    {
-        ErrorDialog(GetTypeName(), "An out-of-memory error occurred. The application will now exit.");
-        return EXIT_FAILURE;
-    }
-}
-
-void Application::ErrorExit(const String& message)
-{
-    engine_->Exit(); // Close the rendering window
-    exitCode_ = EXIT_FAILURE;
-
-    if (!message.Length())
-    {
-        ErrorDialog(GetTypeName(), startupErrors_.Length() ? startupErrors_ :
-            "Application has been terminated due to unexpected error.");
-    }
-    else
-        ErrorDialog(GetTypeName(), message);
-}
-
-void Application::HandleLogMessage(StringHash eventType, VariantMap& eventData)
-{
-    using namespace LogMessage;
-
-    if (eventData[P_LEVEL].GetInt() == LOG_ERROR)
-    {
-        // Strip the timestamp if necessary
-        String error = eventData[P_MESSAGE].GetString();
-        unsigned bracketPos = error.Find(']');
-        if (bracketPos != String::NPOS)
-            error = error.Substring(bracketPos + 2);
-
-        startupErrors_ += error + "\n";
-    }
+void DestroyApplicationInstance() {
+	Application::destroyInstance();
 }
 
 
+Application* Application::_instance = nullptr;
+Application* Application::getInstance() {
+	return _instance;
+}
+
+void Application::createInstance() {
+	CreateApplicationInstance();
+}
+void Application::destroyInstance() {
+	if (_instance != nullptr) {
+		_instance->finalize();
+		delete _instance;
+		_instance = nullptr;
+	}
+}
+
+
+Application::Application(const std::string& title, int width, int height) {
+	_windowTitle  = title;
+	_windowWidth  = width;
+	_windowHeight = height;
+
+	_instance = this;
+}
+Application::~Application() {
+	this->destroyRenderContext();
+}
+
+
+bool Application::createRenderContext(EGLNativeWindowType nativeWindow, EGLNativeDisplayType nativeDisplay) {
+	// Binding rendering API to the OpenGL ES API.
+	if (!eglBindAPI(EGL_OPENGL_ES_API)) {
+		std::cerr << "[ERROR] eglBindAPI\n";
+		return false;
+	}
+
+	// 1.
+	_display = eglGetDisplay(nativeDisplay);
+	if (_display == EGL_NO_DISPLAY) {
+		std::cerr << "[ERROR] eglGetDisplay: EGL_NO_DISPLAY\n";
+		return false;
+	}
+
+	// 2.
+	EGLint major, minor;
+	if (eglInitialize(_display, &major, &minor) == EGL_FALSE) {
+		EGLint error = eglGetError();
+		switch (error) {
+		case EGL_BAD_DISPLAY:
+			std::cerr << "[ERROR] eglInitialize: EGL_BAD_DISPLAY\n";
+			break;
+		case EGL_NOT_INITIALIZED:
+			std::cerr << "[ERROR] eglInitialize: EGL_NOT_INITIALIZED\n";
+			break;
+		default:
+			std::cerr << "[ERROR] eglInitialize: unknown reason, error=" << error << '\n';
+			break;
+		}
+		return false;
+	}
+	std::cout << "EGL initialized successful, EGL v" << major << "." << minor << '\n';
+
+	// 3. Choose configuration.
+	EGLint attribList[] = {
+		EGL_SURFACE_TYPE,    EGL_WINDOW_BIT,
+		EGL_RENDERABLE_TYPE, EGL_OPENGL_ES3_BIT_KHR,
+		EGL_RED_SIZE,        8,
+		EGL_GREEN_SIZE,      8,
+		EGL_BLUE_SIZE,       8,
+		EGL_ALPHA_SIZE,      8,
+		EGL_DEPTH_SIZE,      24,
+		EGL_STENCIL_SIZE,    8,
+		EGL_NONE
+	};
+	EGLConfig config;
+	EGLint numConfigs;
+	if (eglChooseConfig(_display, attribList, &config, 1, &numConfigs) == EGL_FALSE) {
+		std::cerr << "[ERROR] eglChooseConfig failed.\n";
+		return false;
+	}
+	if (numConfigs < 1) {
+		std::cerr << "[ERROR] eglChooseConfig error: num_config = 0\n";
+		return false;
+	}
+
+	// 4. Creates an EGL window surface.
+	EGLint nativeAttribList[] = {
+		EGL_NONE
+	};
+	_surface = eglCreateWindowSurface(_display, config, nativeWindow, nativeAttribList);
+	if (_surface == EGL_NO_SURFACE) {
+		EGLint error = eglGetError();
+		switch (error) {
+		case EGL_BAD_MATCH:
+			std::cerr << "[ERROR] eglCreateWindowSurface: EGL_BAD_MATCH\n";
+			break;
+		case EGL_BAD_CONFIG:
+			std::cerr << "[ERROR] eglCreateWindowSurface: EGL_BAD_CONFIG\n";
+			break;
+		case EGL_BAD_NATIVE_WINDOW:
+			std::cerr << "[ERROR] eglCreateWindowSurface: EGL_BAD_NATIVE_WINDOW\n";
+			break;
+		case EGL_BAD_ALLOC:
+			std::cerr << "[ERROR] eglCreateWindowSurface: EGL_BAD_ALLOC\n";
+			break;
+		default:
+			std::cerr << "[ERROR] eglCreateWindowSurface: unknown reason: " << error << "\n";
+			break;
+		}
+		return false;
+	}
+
+
+	// 5. Create Context.
+	const EGLint contextAttribList[] = {
+		EGL_CONTEXT_CLIENT_VERSION, 3, // OpenGL ES 3.0
+		EGL_NONE
+	};
+	_context = eglCreateContext(_display, config, EGL_NO_CONTEXT, contextAttribList);
+	if (_context == EGL_NO_CONTEXT) {
+		EGLint error = eglGetError();
+		switch (error) {
+		case EGL_BAD_CONFIG:
+			std::cerr << "[ERROR] eglCreateContext failed, EGL_BAD_CONFIG.\n";
+			break;
+		default:
+			std::cerr << "[ERROR] eglCreateContext failed, unknown error=" << error << '\n';
+			break;
+		}
+		return false;
+	}
+
+	// Attack an EGL rendering context to EGL surfaces.
+	if (eglMakeCurrent(_display, _surface, _surface, _context) == EGL_FALSE) {
+		std::cerr << "[ERROR] eglMakeCurrent failed.\n";
+		return false;
+	}
+
+	return true;
+}
+
+
+void Application::destroyRenderContext() {
+	if (_display != nullptr) {
+		eglMakeCurrent(_display, _surface, _surface, _context);
+		eglDestroyContext(_display, _context);
+		eglDestroySurface(_display, _surface);
+
+		eglTerminate(_display);
+
+		_context = nullptr;
+		_surface = nullptr;
+		_display = nullptr;
+	}
+}
+
+
+// post EGL surface color buffer to a native window
+void Application::swapBuffers() {
+	eglSwapBuffers(_display, _surface);
 }
